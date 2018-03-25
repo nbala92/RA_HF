@@ -1,0 +1,129 @@
+----------------------------------------------------------------------------------
+-- Company: 
+-- Engineer: Balázs Nagy
+-- 
+-- Create Date: 03/22/2018 12:18:21 PM
+-- Design Name: 
+-- Module Name: AMBA_APB - Behavioral
+-- Project Name: 
+-- Target Devices: 
+-- Tool Versions: 
+-- Description: 
+-- 
+-- Dependencies: 
+-- 
+-- Revision:
+-- Revision 0.01 - File Created
+-- Additional Comments:
+-- 
+----------------------------------------------------------------------------------
+
+
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+
+-- Uncomment the following library declaration if using
+-- arithmetic functions with Signed or Unsigned values
+--use IEEE.NUMERIC_STD.ALL;
+
+-- Uncomment the following library declaration if instantiating
+-- any Xilinx leaf cells in this code.
+--library UNISIM;
+--use UNISIM.VComponents.all;
+
+entity AMBA_APB is
+    Port (  CLK_AMBA    : in STD_LOGIC;     --Rising_edge clock
+            PRESET      : in STD_LOGIC;     --Active Low reset
+            PADDR       : in STD_LOGIC_VECTOR(32-1 downto 0);   --Address bus
+            PSEL        : in STD_LOGIC;     --Dedicated Chip select
+            PENABLE     : in STD_LOGIC;     --Enable multi cycle indication
+            PWRITE      : in STD_LOGIC;     --Direction High write, Low read
+            PWDATA      : in STD_LOGIC_VECTOR(32-1 downto 0);   --Write bus
+            PREADY      : out STD_LOGIC;    --Ready Cycle extension
+            PRDATA      : out STD_LOGIC_VECTOR(32-1 downto 0);    --Read bus
+            PSLVERR     : out STD_LOGIC     --Transfer failure
+    );
+end AMBA_APB;
+
+architecture Behavioral of AMBA_APB is
+
+-----------------Dual Flop Syncronizer--------
+SIGNAL  buff_PRESET     : STD_LOGIC_VECTOR (1 downto 0):="00";
+SIGNAL  buff_PADDR      : STD_LOGIC_VECTOR (32*2-1 downto 0):=(others=>'0');
+SIGNAL  buff_PSEL       : STD_LOGIC_VECTOR (1 downto 0):="00";
+SIGNAL  buff_PENABLE    : STD_LOGIC_VECTOR (1 downto 0):="00";
+SIGNAL  buff_PWRITE     : STD_LOGIC_VECTOR (1 downto 0):="00";
+SIGNAL  buff_PWDATA     : STD_LOGIC_VECTOR (32*2-1 downto 0):=(others=>'0');
+-------------------No Wait Write---------------
+SIGNAL  write_state     : STD_LOGIC:='0';
+SIGNAL  in_spi_FIFO     : STD_LOGIC_VECTOR (32*2-1 downto 0):=(others=>'0');
+SIGNAL  wren_spi_FIFO   : STD_LOGIC:='0';
+-------------------SPI controller--------------
+SIGNAL  SPI_CLK_freq    : STD_LOGIC_VECTOR(2 downto 0):="000";    --16Mhz/2^(SPI_CLK_freq+1) 
+SIGNAL  SPI_trf_mode    : STD_LOGIC:='0';   --0: Polled 1: Interrupted
+SIGNAL  SPI_bit_word    : STD_LOGIC:='0';   --0: 8bit 1: 16bit
+SIGNAL  SPI_PF_Select   : STD_LOGIC_VECTOR(1 downto 0):="00";
+begin
+-------------------Dual Flop Syncronizer------
+--Neg_edge Buffer--
+process (CLK_AMBA)
+begin
+   if (CLK_AMBA'event and CLK_AMBA = '0') then
+        buff_PRESET(0)              <= PRESET; 
+        buff_PADDR(31 downto 0)     <= PADDR;
+        buff_PSEL(0)                <= PSEL;
+        buff_PENABLE(0)             <= PENABLE;
+        buff_PWRITE(0)              <= PWRITE;
+        buff_PWDATA(31 downto 0)    <= PWDATA;
+   end if;
+end process;
+--Pos_edge Buffer--
+process (CLK_AMBA)
+begin
+   if (CLK_AMBA'event and CLK_AMBA = '1') then
+        buff_PRESET(1)              <= buff_PRESET(0); 
+        buff_PADDR(63 downto 32)    <= buff_PADDR(31 downto 0);
+        buff_PSEL(1)                <= buff_PSEL(0);
+        buff_PENABLE(1)             <= buff_PENABLE(0);
+        buff_PWRITE(1)              <= buff_PWRITE(0);
+        buff_PWDATA(63 downto 32)   <= buff_PWDATA(31 downto 0);
+   end if;
+end process;
+-------------------End Dual Flop Syncronizer---
+
+-------------------No Wait Write---------------
+process (CLK_AMBA)
+begin
+   if (CLK_AMBA'event and CLK_AMBA = '1') then
+       case write_state is
+          when '0' =>  --wait
+             if buff_PSEL(1) = '1' then
+                write_state <= '1';
+                in_spi_FIFO <= buff_PADDR(63 downto 32) & buff_PWDATA(63 downto 32);
+                wren_spi_FIFO <= '1';
+             else
+                wren_spi_FIFO <= '0';
+             end if;
+          when '1' =>
+             if buff_PSEL(1) = '1' and buff_PENABLE(1) = '1' then
+                in_spi_FIFO <= buff_PADDR(63 downto 32) & buff_PWDATA(63 downto 32);
+                wren_spi_FIFO <= '1';
+             else
+                write_state <= '0';
+                wren_spi_FIFO <= '0';
+             end if;
+          when others =>
+            NULL;
+       end case;  
+   end if;
+end process;
+-------------------Wait Read------------------
+process (CLK_AMBA)
+begin
+   if (CLK_AMBA'event and CLK_AMBA = '1') then
+
+   end if;
+   
+end process;
+----------------
+end Behavioral;
