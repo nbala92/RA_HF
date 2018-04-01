@@ -5,23 +5,13 @@
 -- Create Date: 03/22/2018 12:18:21 PM
 -- Design Name: 
 -- Module Name: AMBA_APB - Behavioral
--- Project Name: 
--- Target Devices: 
--- Tool Versions: 
--- Description: 
--- 
--- Dependencies: 
--- 
--- Revision:
--- Revision 0.01 - File Created
--- Additional Comments:
--- 
 ----------------------------------------------------------------------------------
 
 
 library IEEE;
 use IEEE.STD_LOGIC_1164.ALL;
-
+Library UNISIM;
+use UNISIM.vcomponents.all;
 -- Uncomment the following library declaration if using
 -- arithmetic functions with Signed or Unsigned values
 --use IEEE.NUMERIC_STD.ALL;
@@ -58,11 +48,25 @@ SIGNAL  buff_PWDATA     : STD_LOGIC_VECTOR (32*2-1 downto 0):=(others=>'0');
 SIGNAL  write_state     : STD_LOGIC:='0';
 SIGNAL  in_spi_FIFO     : STD_LOGIC_VECTOR (32*2-1 downto 0):=(others=>'0');
 SIGNAL  wren_spi_FIFO   : STD_LOGIC:='0';
+-------------------Wait Read-------------------
+SIGNAL  read_state      : STD_LOGIC_VECTOR(1 downto 0):="00";
+SIGNAL  RDEN_FIFO_ETH   : STD_LOGIC:='0';
+SIGNAL  PACKET_EOF      : STD_LOGIC:='0';
+SIGNAL  FIFO_STATE_ARRAY: STD_LOGIC_VECTOR(32-1 downto 0):=(others=>'0');
+SIGNAL  read_FIFO       : STD_LOGIC_VECTOR(32-1 downto 0):=(others=>'0');
+SIGNAL  DO, DI          : STD_LOGIC_VECTOR(63 downto 0):=(others=>'0');
+SIGNAL  DOP, DIP        : STD_LOGIC_VECTOR(7 downto 0):=(others=>'0');
 -------------------SPI controller--------------
 SIGNAL  SPI_CLK_freq    : STD_LOGIC_VECTOR(2 downto 0):="000";    --16Mhz/2^(SPI_CLK_freq+1) 
 SIGNAL  SPI_trf_mode    : STD_LOGIC:='0';   --0: Polled 1: Interrupted
 SIGNAL  SPI_bit_word    : STD_LOGIC:='0';   --0: 8bit 1: 16bit
 SIGNAL  SPI_PF_Select   : STD_LOGIC_VECTOR(1 downto 0):="00";
+SIGNAL  WREN_FIFO_ETH   : STD_LOGIC:='0';
+-------------------Output logic----------------
+SIGNAL  buff_PREADY     : STD_LOGIC:='0';
+SIGNAL  buff_PSLVERR    : STD_LOGIC:='0';
+SIGNAL  buff_PRDATA     : STD_LOGIC_VECTOR(32-1 downto 0):=(others=>'0');
+
 begin
 -------------------Dual Flop Syncronizer------
 --Neg_edge Buffer--
@@ -97,7 +101,7 @@ begin
    if (CLK_AMBA'event and CLK_AMBA = '1') then
        case write_state is
           when '0' =>  --wait
-             if buff_PSEL(1) = '1' then
+             if buff_PSEL(1) = '1' and buff_PWRITE(1) = '1' then
                 write_state <= '1';
                 in_spi_FIFO <= buff_PADDR(63 downto 32) & buff_PWDATA(63 downto 32);
                 wren_spi_FIFO <= '1';
@@ -120,10 +124,96 @@ end process;
 -------------------Wait Read------------------
 process (CLK_AMBA)
 begin
-   if (CLK_AMBA'event and CLK_AMBA = '1') then
-
-   end if;
-   
+    if (CLK_AMBA'event and CLK_AMBA = '1') then
+        case read_state is
+            when "00" =>
+                if buff_PSEL(1) = '1' and buff_PWRITE(1) = '0' then
+                    
+                    case buff_PADDR(0) is
+                        when '0' =>
+                            buff_PREADY <= '1';
+                            RDEN_FIFO_ETH <= '1';
+                            read_state <= "01";
+                        when '1' =>
+                            buff_PREADY <= '1';
+                            RDEN_FIFO_ETH <= '0';
+                            read_state <= "01";
+                        when others =>
+                            read_state <= "11";
+                            buff_PSLVERR <= '1';
+                    end case;
+                else
+                    read_state <= "00";
+                end if;
+            when "01" =>
+                buff_PRDATA <= read_FIFO;
+                if PACKET_EOF = '1' then
+                    buff_PREADY <= '0';
+                    RDEN_FIFO_ETH <= '0'; --00 Line have to be intrested after each packet
+                else
+                    buff_PREADY <= '1';
+                end if;
+            when "10" =>
+                buff_PREADY <= '0';
+                buff_PRDATA <= FIFO_STATE_ARRAY;
+                read_state <= "00";
+            when "11" =>
+                PSLVERR <= '0';
+                read_state <= "00";
+            when others =>
+                NULL;
+        end case;
+    end if;
 end process;
+-------------------RX Lines-------------------
+FIFO36E1_inst : FIFO36E1
+generic map (
+   ALMOST_EMPTY_OFFSET => X"0080",   -- Sets the almost empty threshold
+   ALMOST_FULL_OFFSET => X"0080",    -- Sets almost full threshold
+   DATA_WIDTH => 36,                  -- Sets data width to 4-72
+   DO_REG => 1,                      -- Enable output register (1-0) Must be 1 if EN_SYN = FALSE
+   EN_ECC_READ => FALSE,             -- Enable ECC decoder, FALSE, TRUE
+   EN_ECC_WRITE => FALSE,            -- Enable ECC encoder, FALSE, TRUE
+   EN_SYN => FALSE,                  -- Specifies FIFO as Asynchronous (FALSE) or Synchronous (TRUE)
+   FIFO_MODE => "FIFO36",            -- Sets mode to "FIFO36" or "FIFO36_72" 
+   FIRST_WORD_FALL_THROUGH => FALSE, -- Sets the FIFO FWFT to FALSE, TRUE
+   INIT => X"000000000000000000",    -- Initial values on output port
+   SIM_DEVICE => "7SERIES",          -- Must be set to "7SERIES" for simulation behavior
+   SRVAL => X"000000000000000000"    -- Set/Reset value for output port
+)
+
+port map (
+   -- ECC Signals: 1-bit (each) output: Error Correction Circuitry ports
+   DBITERR => open,             -- 1-bit output: Double bit error status
+   ECCPARITY => open,         -- 8-bit output: Generated error correction parity
+   SBITERR => open,             -- 1-bit output: Single bit error status
+   -- Read Data: 64-bit (each) output: Read output data
+   DO => DO,                       -- 64-bit output: Data output
+   DOP => DOP,                     -- 8-bit output: Parity data output
+   -- Status: 1-bit (each) output: Flags and other FIFO status outputs
+   ALMOSTEMPTY => open,     -- 1-bit output: Almost empty flag
+   ALMOSTFULL => open,       -- 1-bit output: Almost full flag
+   EMPTY => open,                 -- 1-bit output: Empty flag
+   FULL => open,                   -- 1-bit output: Full flag
+   RDCOUNT => open,             -- 13-bit output: Read count
+   RDERR => open,                 -- 1-bit output: Read error
+   WRCOUNT => open,             -- 13-bit output: Write count
+   WRERR => open,                 -- 1-bit output: Write error
+   -- ECC Signals: 1-bit (each) input: Error Correction Circuitry ports
+   INJECTDBITERR => '0', -- 1-bit input: Inject a double bit error input
+   INJECTSBITERR => '0',
+   -- Read Control Signals: 1-bit (each) input: Read clock, enable and reset input signals
+   RDCLK => CLK_AMBA,                 -- 1-bit input: Read clock
+   RDEN => RDEN_FIFO_ETH,                   -- 1-bit input: Read enable
+   REGCE => '1',                 -- 1-bit input: Clock enable
+   RST => buff_PRESET(1),                     -- 1-bit input: Reset
+   RSTREG => '0',               -- 1-bit input: Output register set/reset
+   -- Write Control Signals: 1-bit (each) input: Write clock and enable input signals
+   WRCLK => CLK_AMBA,                 -- 1-bit input: Rising edge write clock.
+   WREN => WREN_FIFO_ETH,                   -- 1-bit input: Write enable
+   -- Write Data: 64-bit (each) input: Write input data
+   DI => DI,                       -- 64-bit input: Data input
+   DIP => DIP                      -- 8-bit input: Parity input
+);
 ----------------
 end Behavioral;
